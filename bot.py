@@ -40,10 +40,16 @@ def get_all_pairs():
         r = session.get(url, timeout=10, verify=certifi.where())
         data = r.json()
 
+        # ✅ SAFE CHECK (IMPORTANT FIX)
+        if "symbols" not in data:
+            print("BINANCE RESPONSE ERROR:", data)
+            return []
+
         pairs = [
             s["symbol"]
             for s in data["symbols"]
-            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+            if s.get("quoteAsset") == "USDT"
+            and s.get("status") == "TRADING"
         ]
 
         priority = [
@@ -57,9 +63,8 @@ def get_all_pairs():
         return ordered[:MAX_PAIRS]
 
     except Exception as e:
-        log(f"PAIR ERROR: {e}")
+        print("PAIR FETCH ERROR:", e)
         return []
-
 # =========================
 # KLINES
 # =========================
