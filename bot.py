@@ -13,84 +13,18 @@ TELEGRAM_CHAT_ID = "6516267389"
 # =========================
 # SETTINGS
 # =========================
-SCAN_INTERVAL = 20
+SCAN_INTERVAL = 40
 COOLDOWN_SECONDS = 120
-MAX_THREADS = 8
-MAX_PAIRS = 250
-
-# =========================
-# MODE SYSTEM
-# =========================
-MODE = "HIGH"
-
-# =========================
-# ADAPTIVE SYSTEM
-# =========================
-ADAPTIVE = True
+MAX_THREADS = 10
+MAX_PAIRS = 200
 
 session = requests.Session()
 lock = threading.Lock()
 last_sent = {}
-
-# =========================
-# MEMORY
-# =========================
 memory = {}
 
-def ai_bias(symbol):
-    if symbol not in memory:
-        return 0
-
-    d = memory[symbol]
-    total = d["wins"] + d["loss"]
-
-    if total == 0:
-        return 0
-
-    return (d["wins"] / total) * 2 - 1
-
-
 # =========================
-# ORDER BOOK
-# =========================
-def orderbook_pressure(symbol):
-    url = "https://fapi.binance.com/fapi/v1/depth"
-
-    try:
-        r = session.get(url, params={"symbol": symbol, "limit": 20}, timeout=5, verify=certifi.where())
-        data = r.json()
-
-        if not isinstance(data, dict):
-            return 1
-
-        bids = sum(float(x[1]) for x in data.get("bids", []))
-        asks = sum(float(x[1]) for x in data.get("asks", []))
-
-        return bids / asks if asks != 0 else 1
-
-    except:
-        return 1
-
-
-# =========================
-# TELEGRAM
-# =========================
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    try:
-        session.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-            timeout=(10, 30),
-            verify=certifi.where()
-        )
-    except:
-        pass
-
-
-# =========================
-# PAIRS
+# PAIRS (TOP PRIORITY)
 # =========================
 def get_all_pairs():
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -99,82 +33,54 @@ def get_all_pairs():
         r = session.get(url, timeout=10, verify=certifi.where())
         data = r.json()
 
-        pairs = [
+        all_pairs = [
             s["symbol"]
             for s in data["symbols"]
-            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+            if s["quoteAsset"] == "USDT"
+            and s["status"] == "TRADING"
         ]
 
-        return pairs[:MAX_PAIRS]
+        priority = [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
+            "XRPUSDT", "ADAUSDT", "DOGEUSDT", "TONUSDT",
+            "AVAXUSDT", "LINKUSDT", "TRXUSDT", "LTCUSDT"
+        ]
+
+        ordered = priority + [p for p in all_pairs if p not in priority]
+
+        return ordered[:MAX_PAIRS]
 
     except:
         return []
 
-
 # =========================
 # KLINES
 # =========================
-def get_klines(symbol, interval="5m", limit=100):
+def get_klines(symbol, interval, limit=100):
     url = "https://fapi.binance.com/fapi/v1/klines"
 
     try:
-        r = session.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10, verify=certifi.where())
+        r = session.get(url, params={
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        }, timeout=10, verify=certifi.where())
+
         data = r.json()
 
-        if not isinstance(data, list):
-            return None
-
-        closes = [float(x[4]) for x in data]
         highs = [float(x[2]) for x in data]
         lows = [float(x[3]) for x in data]
-        volumes = [float(x[5]) for x in data]
+        closes = [float(x[4]) for x in data]
 
-        return highs, lows, closes, volumes
+        return highs, lows, closes
 
     except:
         return None
 
-
 # =========================
-# INDICATORS
+# ATR
 # =========================
-def ema(data, period):
-    if len(data) < period:
-        return data[-1]
-
-    k = 2 / (period + 1)
-    ema_val = sum(data[:period]) / period
-
-    for p in data[period:]:
-        ema_val = p * k + ema_val * (1 - k)
-
-    return ema_val
-
-
-def rsi(closes, period=14):
-    if len(closes) < period + 2:
-        return 50
-
-    gains, losses = [], []
-
-    for i in range(1, period + 1):
-        diff = closes[-i] - closes[-i - 1]
-        if diff > 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
-
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-def atr(highs, lows, closes):
+def atr(highs, lows, closes, period=14):
     trs = []
 
     for i in range(1, len(closes)):
@@ -185,116 +91,193 @@ def atr(highs, lows, closes):
         )
         trs.append(tr)
 
-    if len(trs) < 14:
+    if len(trs) < period:
         return sum(trs) / max(len(trs), 1)
 
-    return sum(trs[-14:]) / 14
+    return sum(trs[-period:]) / period
 
+# =========================
+# EMA
+# =========================
+def ema(data, period):
+    k = 2 / (period + 1)
+    ema_val = data[0]
+
+    for price in data[1:]:
+        ema_val = price * k + ema_val * (1 - k)
+
+    return ema_val
+
+# =========================
+# RSI
+# =========================
+def rsi(closes):
+    if len(closes) < 15:
+        return 50
+
+    gains = losses = 0
+
+    for i in range(-14, -1):
+        diff = closes[i] - closes[i - 1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses += abs(diff)
+
+    if losses == 0:
+        return 100
+
+    rs = gains / losses
+    return 100 - (100 / (1 + rs))
+
+# =========================
+# ORDERBOOK
+# =========================
+def orderbook_pressure(symbol):
+    url = "https://fapi.binance.com/fapi/v1/depth"
+
+    try:
+        r = session.get(url, params={"symbol": symbol, "limit": 20}, timeout=5, verify=certifi.where())
+        data = r.json()
+
+        bids = sum(float(x[1]) for x in data.get("bids", []))
+        asks = sum(float(x[1]) for x in data.get("asks", []))
+
+        return bids / asks if asks != 0 else 1
+
+    except:
+        return 1
+
+# =========================
+# MULTI TIMEFRAME
+# =========================
+def get_multi(symbol):
+    return (
+        get_klines(symbol, "1m", 100),
+        get_klines(symbol, "5m", 100),
+        get_klines(symbol, "15m", 100)
+    )
+
+# =========================
+# MARKET STRENGTH
+# =========================
+def market_strength(score):
+    if score >= 6:
+        return "STRONG"
+    elif score >= 3:
+        return "MEDIUM"
+    else:
+        return "WEAK"
+
+# =========================
+# SAFE TP/SL (FIXED PROFESSIONAL)
+# =========================
+def smart_tp_sl(price, vol, score, direction):
+
+    strength = market_strength(score)
+
+    # 🔥 FIXED RISK (1% max volatility cap)
+    risk = min(price * 0.004, vol * 1.5)   # 0.4% risk max
+
+    # ================= BUY =================
+    if direction == "BUY":
+
+        sl = price - risk
+
+        if strength == "STRONG":
+            tp = price + (risk * 3)
+        elif strength == "MEDIUM":
+            tp = price + (risk * 2)
+        else:
+            tp = price + (risk * 1.5)
+
+    # ================= SELL =================
+    else:
+
+        sl = price + risk
+
+        if strength == "STRONG":
+            tp = price - (risk * 3)
+        elif strength == "MEDIUM":
+            tp = price - (risk * 2)
+        else:
+            tp = price - (risk * 1.5)
+
+    return tp, sl, strength
 
 # =========================
 # ANALYZE
 # =========================
 def analyze(symbol):
 
-    data = get_klines(symbol)
-
+    data = get_multi(symbol)
     if not data:
         return None
 
-    highs, lows, closes, volumes = data
+    (h1, l1, c1), (h5, l5, c5), (h15, l15, c15) = data
 
-    if len(closes) < 60:
+    if len(c1) < 50:
         return None
 
-    price = closes[-1]
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-    rsi_val = rsi(closes)
-    vol = atr(highs, lows, closes)
+    price = c1[-1]
 
-    support = min(lows[-20:])
-    resistance = max(highs[-20:])
+    ema20 = ema(c1, 20)
+    ema50 = ema(c1, 50)
+    rsi_val = rsi(c1)
 
-    regime = "TREND" if abs(ema20 - ema50) / price > 0.003 else "SIDEWAYS"
-    vol_ok = volumes[-1] > sum(volumes[-20:]) / 20
+    trend_5m = 1 if ema(c5, 20) > ema(c5, 50) else -1
+    trend_15m = 1 if ema(c15, 20) > ema(c15, 50) else -1
 
     pressure = orderbook_pressure(symbol)
-    bias = ai_bias(symbol)
 
     score = 0
 
-    if ema20 > ema50:
-        score += 2
-    else:
-        score -= 2
+    score += 1 if ema20 > ema50 else -1
 
-    if 45 < rsi_val < 75:
+    if rsi_val > 55:
         score += 1
-    elif rsi_val < 35:
+    elif rsi_val < 45:
         score -= 1
 
-    if vol_ok:
-        score += 2
+    score += trend_5m * 2
+    score += trend_15m * 2
 
-    if regime == "TREND":
-        score += 2
-    else:
-        score -= 1
+    if pressure > 1.1:
+        score += 0.5
+    elif pressure < 0.9:
+        score -= 0.5
 
-    if pressure > 1.2:
-        score += 1
-    elif pressure < 0.8:
-        score -= 1
+    vol = atr(h1, l1, c1)
 
-    score += bias
+    signal_tf = "1M"
+    if trend_15m == 1:
+        signal_tf = "15M"
+    elif trend_5m == 1:
+        signal_tf = "5M"
 
-    # MODE
-    if MODE == "SNIPER":
-        buy_th = 6
-        sell_th = -6
-    elif MODE == "BALANCED":
-        buy_th = 5
-        sell_th = -5
-    else:
-        buy_th = 3
-        sell_th = -3
+    # ================= SIGNAL =================
+    if score >= 2:
+        tp, sl, strength = smart_tp_sl(price, vol, score, "BUY")
+        return "BUY 🟢", price, sl, tp, signal_tf, strength, 80 + abs(score)*5
 
-    # ADAPTIVE
-    if ADAPTIVE:
-        avg_vol = sum(volumes[-20:]) / 20
+    elif score <= -2:
+        tp, sl, strength = smart_tp_sl(price, vol, score, "SELL")
+        return "SELL 🔴", price, sl, tp, signal_tf, strength, 80 + abs(score)*5
 
-        if vol > avg_vol * 1.5:
-            buy_th += 1
-            sell_th -= 1
-        elif vol < avg_vol * 0.8:
-            buy_th -= 1
-            sell_th += 1
-
-    if score >= buy_th:
-        signal = "BUY 🟢"
-    elif score <= sell_th:
-        signal = "SELL 🔴"
-    else:
-        return None
-
-    probability = min(97, max(70, int(80 + abs(score) * 5)))
-
-    return signal, price, support, resistance, vol, probability
-
+    return None
 
 # =========================
 # PROCESS
 # =========================
-def process_symbol(symbol):
+def process(symbol):
     global last_sent
 
     try:
-        result = analyze(symbol)
-
-        if not result:
+        res = analyze(symbol)
+        if not res:
             return
 
-        signal, price, support, resistance, vol, probability = result
+        signal, price, sl, tp, tf, strength, prob = res
 
         key = f"{symbol}_{signal}"
         now = time.time()
@@ -304,29 +287,19 @@ def process_symbol(symbol):
                 return
             last_sent[key] = now
 
-        risk = vol * 2
-        reward = vol * 3
-
-        if "BUY" in signal:
-            tp = price + reward
-            sl = price - risk
-        else:
-            tp = price - reward
-            sl = price + risk
-
         msg = f"""
-🚀 INSTITUTIONAL SNIPER BOT
+🚀 SNIPER BOT PRO FINAL
 
 💱 Pair: {symbol}
-⚙ Mode: {MODE}
-🧠 Adaptive: {ADAPTIVE}
+📊 TF: {tf}
+📈 Strength: {strength}
 
 {signal}
-🔥 Probability: {probability}%
+🔥 Probability: {prob:.2f}%
 
-📥 Entry: {round(price, 6)}
-🎯 TP: {round(tp, 6)}
-🛑 SL: {round(sl, 6)}
+📥 Entry: {price}
+🎯 TP: {tp}
+🛑 SL: {sl}
 """
 
         print(msg)
@@ -335,18 +308,26 @@ def process_symbol(symbol):
     except:
         pass
 
+# =========================
+# TELEGRAM
+# =========================
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        session.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10, verify=certifi.where())
+    except:
+        pass
 
 # =========================
 # MAIN
 # =========================
-print("🔥 INSTITUTIONAL SNIPER BOT RUNNING")
+print("🔥 BOT RUNNING (FINAL PRO VERSION)")
 
 pairs = get_all_pairs()
-print("Loaded Pairs:", len(pairs))
 
 while True:
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as ex:
-        ex.map(process_symbol, pairs)
+        ex.map(process, pairs)
 
-    print("⏳ scanning...")
+    print("Scanning...")
     time.sleep(SCAN_INTERVAL)
