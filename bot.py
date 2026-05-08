@@ -2,6 +2,7 @@ import requests
 import time
 import threading
 import certifi
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 # =========================
@@ -24,7 +25,13 @@ last_sent = {}
 memory = {}
 
 # =========================
-# PAIRS (TOP PRIORITY)
+# LOG SAFE PRINT
+# =========================
+def log(msg):
+    print(f"[BOT] {msg}", flush=True)
+
+# =========================
+# PAIRS
 # =========================
 def get_all_pairs():
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -33,24 +40,24 @@ def get_all_pairs():
         r = session.get(url, timeout=10, verify=certifi.where())
         data = r.json()
 
-        all_pairs = [
+        pairs = [
             s["symbol"]
             for s in data["symbols"]
-            if s["quoteAsset"] == "USDT"
-            and s["status"] == "TRADING"
+            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
         ]
 
         priority = [
             "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
             "XRPUSDT", "ADAUSDT", "DOGEUSDT", "TONUSDT",
-            "AVAXUSDT", "LINKUSDT", "TRXUSDT", "LTCUSDT"
+            "AVAXUSDT", "LINKUSDT"
         ]
 
-        ordered = priority + [p for p in all_pairs if p not in priority]
+        ordered = priority + [p for p in pairs if p not in priority]
 
         return ordered[:MAX_PAIRS]
 
-    except:
+    except Exception as e:
+        log(f"PAIR ERROR: {e}")
         return []
 
 # =========================
@@ -60,13 +67,17 @@ def get_klines(symbol, interval, limit=100):
     url = "https://fapi.binance.com/fapi/v1/klines"
 
     try:
-        r = session.get(url, params={
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }, timeout=10, verify=certifi.where())
+        r = session.get(
+            url,
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10,
+            verify=certifi.where()
+        )
 
         data = r.json()
+
+        if not isinstance(data, list):
+            return None
 
         highs = [float(x[2]) for x in data]
         lows = [float(x[3]) for x in data]
@@ -74,7 +85,8 @@ def get_klines(symbol, interval, limit=100):
 
         return highs, lows, closes
 
-    except:
+    except Exception as e:
+        log(f"KLINES ERROR {symbol}: {e}")
         return None
 
 # =========================
@@ -149,61 +161,44 @@ def orderbook_pressure(symbol):
         return 1
 
 # =========================
-# MULTI TIMEFRAME
+# MULTI TF
 # =========================
 def get_multi(symbol):
     return (
-        get_klines(symbol, "1m", 100),
-        get_klines(symbol, "5m", 100),
-        get_klines(symbol, "15m", 100)
+        get_klines(symbol, "1m"),
+        get_klines(symbol, "5m"),
+        get_klines(symbol, "15m")
     )
 
 # =========================
-# MARKET STRENGTH
-# =========================
-def market_strength(score):
-    if score >= 6:
-        return "STRONG"
-    elif score >= 3:
-        return "MEDIUM"
-    else:
-        return "WEAK"
-
-# =========================
-# SAFE TP/SL (FIXED PROFESSIONAL)
+# TP/SL SAFE FIX
 # =========================
 def smart_tp_sl(price, vol, score, direction):
 
-    strength = market_strength(score)
+    # safe risk cap (VERY IMPORTANT)
+    risk = min(price * 0.004, vol * 1.5)
 
-    # 🔥 FIXED RISK (1% max volatility cap)
-    risk = min(price * 0.004, vol * 1.5)   # 0.4% risk max
-
-    # ================= BUY =================
     if direction == "BUY":
-
         sl = price - risk
 
-        if strength == "STRONG":
-            tp = price + (risk * 3)
-        elif strength == "MEDIUM":
-            tp = price + (risk * 2)
+        if score >= 6:
+            tp = price + risk * 3
+        elif score >= 3:
+            tp = price + risk * 2
         else:
-            tp = price + (risk * 1.5)
+            tp = price + risk * 1.5
 
-    # ================= SELL =================
     else:
-
         sl = price + risk
 
-        if strength == "STRONG":
-            tp = price - (risk * 3)
-        elif strength == "MEDIUM":
-            tp = price - (risk * 2)
+        if score <= -6:
+            tp = price - risk * 3
+        elif score <= -3:
+            tp = price - risk * 2
         else:
-            tp = price - (risk * 1.5)
+            tp = price - risk * 1.5
 
-    return tp, sl, strength
+    return tp, sl
 
 # =========================
 # ANALYZE
@@ -225,13 +220,12 @@ def analyze(symbol):
     ema50 = ema(c1, 50)
     rsi_val = rsi(c1)
 
-    trend_5m = 1 if ema(c5, 20) > ema(c5, 50) else -1
-    trend_15m = 1 if ema(c15, 20) > ema(c15, 50) else -1
+    trend5 = 1 if ema(c5, 20) > ema(c5, 50) else -1
+    trend15 = 1 if ema(c15, 20) > ema(c15, 50) else -1
 
     pressure = orderbook_pressure(symbol)
 
     score = 0
-
     score += 1 if ema20 > ema50 else -1
 
     if rsi_val > 55:
@@ -239,8 +233,8 @@ def analyze(symbol):
     elif rsi_val < 45:
         score -= 1
 
-    score += trend_5m * 2
-    score += trend_15m * 2
+    score += trend5 * 2
+    score += trend15 * 2
 
     if pressure > 1.1:
         score += 0.5
@@ -249,35 +243,38 @@ def analyze(symbol):
 
     vol = atr(h1, l1, c1)
 
-    signal_tf = "1M"
-    if trend_15m == 1:
-        signal_tf = "15M"
-    elif trend_5m == 1:
-        signal_tf = "5M"
-
-    # ================= SIGNAL =================
     if score >= 2:
-        tp, sl, strength = smart_tp_sl(price, vol, score, "BUY")
-        return "BUY 🟢", price, sl, tp, signal_tf, strength, 80 + abs(score)*5
+        tp, sl = smart_tp_sl(price, vol, score, "BUY")
+        return "BUY 🟢", price, sl, tp, score
 
     elif score <= -2:
-        tp, sl, strength = smart_tp_sl(price, vol, score, "SELL")
-        return "SELL 🔴", price, sl, tp, signal_tf, strength, 80 + abs(score)*5
+        tp, sl = smart_tp_sl(price, vol, score, "SELL")
+        return "SELL 🔴", price, sl, tp, score
 
     return None
+
+# =========================
+# SEND TELEGRAM
+# =========================
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    try:
+        session.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
+    except Exception as e:
+        log(f"TELEGRAM ERROR: {e}")
 
 # =========================
 # PROCESS
 # =========================
 def process(symbol):
-    global last_sent
 
     try:
         res = analyze(symbol)
         if not res:
             return
 
-        signal, price, sl, tp, tf, strength, prob = res
+        signal, price, sl, tp, score = res
 
         key = f"{symbol}_{signal}"
         now = time.time()
@@ -288,46 +285,39 @@ def process(symbol):
             last_sent[key] = now
 
         msg = f"""
-🚀 SNIPER BOT PRO FINAL
+🚀 SNIPER BOT FIXED
 
 💱 Pair: {symbol}
-📊 TF: {tf}
-📈 Strength: {strength}
-
-{signal}
-🔥 Probability: {prob:.2f}%
+📊 Signal: {signal}
+📈 Score: {score}
 
 📥 Entry: {price}
 🎯 TP: {tp}
 🛑 SL: {sl}
 """
 
-        print(msg)
+        log(msg)
         send_telegram(msg)
 
-    except:
-        pass
+    except Exception as e:
+        log(f"PROCESS ERROR {symbol}: {e}")
+        traceback.print_exc()
 
 # =========================
-# TELEGRAM
+# MAIN LOOP (RAILWAY SAFE)
 # =========================
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        session.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10, verify=certifi.where())
-    except:
-        pass
-
-# =========================
-# MAIN
-# =========================
-print("🔥 BOT RUNNING (FINAL PRO VERSION)")
+log("🔥 BOT STARTED (RAILWAY STABLE VERSION)")
 
 pairs = get_all_pairs()
 
 while True:
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as ex:
-        ex.map(process, pairs)
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_THREADS) as ex:
+            list(ex.map(process, pairs))
 
-    print("Scanning...")
+    except Exception as e:
+        log(f"MAIN LOOP ERROR: {e}")
+        traceback.print_exc()
+
+    log("Scanning...")
     time.sleep(SCAN_INTERVAL)
