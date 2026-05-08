@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN = "8626:AAGv8017474Ww5PoksQUoFYs1nVEBHPROr30SgCTI"
 TELEGRAM_CHAT_ID = "6516267389"
 
 # =========================
-# SETTINGS (TUNED)
+# SETTINGS
 # =========================
 SCAN_INTERVAL = 20
 COOLDOWN_SECONDS = 120
@@ -21,7 +21,7 @@ MAX_PAIRS = 250
 # =========================
 # MODE SYSTEM
 # =========================
-MODE = "HIGH"   # SNIPER / BALANCED / HIGH
+MODE = "HIGH"
 
 # =========================
 # ADAPTIVE SYSTEM
@@ -33,19 +33,9 @@ lock = threading.Lock()
 last_sent = {}
 
 # =========================
-# AI MEMORY SYSTEM
+# MEMORY
 # =========================
 memory = {}
-
-def update_memory(symbol, result):
-    if symbol not in memory:
-        memory[symbol] = {"wins": 0, "loss": 0}
-
-    if result == "WIN":
-        memory[symbol]["wins"] += 1
-    else:
-        memory[symbol]["loss"] += 1
-
 
 def ai_bias(symbol):
     if symbol not in memory:
@@ -67,16 +57,14 @@ def orderbook_pressure(symbol):
     url = "https://fapi.binance.com/fapi/v1/depth"
 
     try:
-        r = session.get(
-            url,
-            params={"symbol": symbol, "limit": 20},
-            timeout=5,
-            verify=certifi.where()
-        )
+        r = session.get(url, params={"symbol": symbol, "limit": 20}, timeout=5, verify=certifi.where())
         data = r.json()
 
-        bids = sum(float(x[1]) for x in data["bids"])
-        asks = sum(float(x[1]) for x in data["asks"])
+        if not isinstance(data, dict):
+            return 1
+
+        bids = sum(float(x[1]) for x in data.get("bids", []))
+        asks = sum(float(x[1]) for x in data.get("asks", []))
 
         return bids / asks if asks != 0 else 1
 
@@ -97,8 +85,8 @@ def send_telegram(msg):
             timeout=(10, 30),
             verify=certifi.where()
         )
-    except Exception as e:
-        print("Telegram Error:", e)
+    except:
+        pass
 
 
 # =========================
@@ -117,14 +105,7 @@ def get_all_pairs():
             if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
         ]
 
-        top_pairs = [
-            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
-            "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT",
-            "LINKUSDT", "MATICUSDT"
-        ]
-
-        final = [p for p in top_pairs if p in pairs] + [p for p in pairs if p not in top_pairs]
-        return final[:MAX_PAIRS]
+        return pairs[:MAX_PAIRS]
 
     except:
         return []
@@ -137,14 +118,11 @@ def get_klines(symbol, interval="5m", limit=100):
     url = "https://fapi.binance.com/fapi/v1/klines"
 
     try:
-        r = session.get(
-            url,
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=10,
-            verify=certifi.where()
-        )
-
+        r = session.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10, verify=certifi.where())
         data = r.json()
+
+        if not isinstance(data, list):
+            return None
 
         closes = [float(x[4]) for x in data]
         highs = [float(x[2]) for x in data]
@@ -174,11 +152,13 @@ def ema(data, period):
 
 
 def rsi(closes, period=14):
+    if len(closes) < period + 2:
+        return 50
+
     gains, losses = [], []
 
     for i in range(1, period + 1):
         diff = closes[-i] - closes[-i - 1]
-
         if diff > 0:
             gains.append(diff)
         else:
@@ -205,6 +185,9 @@ def atr(highs, lows, closes):
         )
         trs.append(tr)
 
+    if len(trs) < 14:
+        return sum(trs) / max(len(trs), 1)
+
     return sum(trs[-14:]) / 14
 
 
@@ -212,12 +195,16 @@ def atr(highs, lows, closes):
 # ANALYZE
 # =========================
 def analyze(symbol):
+
     data = get_klines(symbol)
 
     if not data:
         return None
 
     highs, lows, closes, volumes = data
+
+    if len(closes) < 60:
+        return None
 
     price = closes[-1]
     ema20 = ema(closes, 20)
@@ -241,7 +228,6 @@ def analyze(symbol):
     else:
         score -= 2
 
-    # RSI widened
     if 45 < rsi_val < 75:
         score += 1
     elif rsi_val < 35:
@@ -341,16 +327,13 @@ def process_symbol(symbol):
 📥 Entry: {round(price, 6)}
 🎯 TP: {round(tp, 6)}
 🛑 SL: {round(sl, 6)}
-
-📊 Support: {round(support, 6)}
-📊 Resistance: {round(resistance, 6)}
 """
 
         print(msg)
         send_telegram(msg)
 
-    except Exception as e:
-        print(symbol, "Error:", e)
+    except:
+        pass
 
 
 # =========================
