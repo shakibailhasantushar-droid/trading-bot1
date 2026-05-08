@@ -1,7 +1,6 @@
 import requests
 import time
 import threading
-from datetime import datetime
 import certifi
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,20 +11,20 @@ TELEGRAM_BOT_TOKEN = "8626:AAGv8017474Ww5PoksQUoFYs1nVEBHPROr30SgCTI"
 TELEGRAM_CHAT_ID = "6516267389"
 
 # =========================
-# SETTINGS
+# SETTINGS (TUNED)
 # =========================
 SCAN_INTERVAL = 20
-COOLDOWN_SECONDS = 3600
+COOLDOWN_SECONDS = 120
 MAX_THREADS = 8
-MAX_PAIRS = 100
+MAX_PAIRS = 250
 
 # =========================
 # MODE SYSTEM
 # =========================
-MODE = "SNIPER"   # SNIPER / BALANCED / HIGH
+MODE = "HIGH"   # SNIPER / BALANCED / HIGH
 
 # =========================
-# ADAPTIVE SYSTEM (ADDED)
+# ADAPTIVE SYSTEM
 # =========================
 ADAPTIVE = True
 
@@ -68,7 +67,12 @@ def orderbook_pressure(symbol):
     url = "https://fapi.binance.com/fapi/v1/depth"
 
     try:
-        r = session.get(url, params={"symbol": symbol, "limit": 20}, timeout=5)
+        r = session.get(
+            url,
+            params={"symbol": symbol, "limit": 20},
+            timeout=5,
+            verify=certifi.where()
+        )
         data = r.json()
 
         bids = sum(float(x[1]) for x in data["bids"])
@@ -85,6 +89,7 @@ def orderbook_pressure(symbol):
 # =========================
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
     try:
         session.post(
             url,
@@ -113,9 +118,9 @@ def get_all_pairs():
         ]
 
         top_pairs = [
-            "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT",
-            "XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT",
-            "LINKUSDT","MATICUSDT"
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
+            "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT",
+            "LINKUSDT", "MATICUSDT"
         ]
 
         final = [p for p in top_pairs if p in pairs] + [p for p in pairs if p not in top_pairs]
@@ -173,6 +178,7 @@ def rsi(closes, period=14):
 
     for i in range(1, period + 1):
         diff = closes[-i] - closes[-i - 1]
+
         if diff > 0:
             gains.append(diff)
         else:
@@ -190,6 +196,7 @@ def rsi(closes, period=14):
 
 def atr(highs, lows, closes):
     trs = []
+
     for i in range(1, len(closes)):
         tr = max(
             highs[i] - lows[i],
@@ -205,15 +212,14 @@ def atr(highs, lows, closes):
 # ANALYZE
 # =========================
 def analyze(symbol):
-
     data = get_klines(symbol)
+
     if not data:
         return None
 
     highs, lows, closes, volumes = data
 
     price = closes[-1]
-
     ema20 = ema(closes, 20)
     ema50 = ema(closes, 50)
     rsi_val = rsi(closes)
@@ -222,7 +228,7 @@ def analyze(symbol):
     support = min(lows[-20:])
     resistance = max(highs[-20:])
 
-    regime = "TREND" if abs(ema20 - ema50)/price > 0.003 else "SIDEWAYS"
+    regime = "TREND" if abs(ema20 - ema50) / price > 0.003 else "SIDEWAYS"
     vol_ok = volumes[-1] > sum(volumes[-20:]) / 20
 
     pressure = orderbook_pressure(symbol)
@@ -235,9 +241,10 @@ def analyze(symbol):
     else:
         score -= 2
 
-    if 50 < rsi_val < 70:
+    # RSI widened
+    if 45 < rsi_val < 75:
         score += 1
-    elif rsi_val < 40:
+    elif rsi_val < 35:
         score -= 1
 
     if vol_ok:
@@ -255,9 +262,7 @@ def analyze(symbol):
 
     score += bias
 
-    # =========================
-    # MODE BASE THRESHOLD
-    # =========================
+    # MODE
     if MODE == "SNIPER":
         buy_th = 6
         sell_th = -6
@@ -265,12 +270,10 @@ def analyze(symbol):
         buy_th = 5
         sell_th = -5
     else:
-        buy_th = 4
-        sell_th = -4
+        buy_th = 3
+        sell_th = -3
 
-    # =========================
-    # ADAPTIVE SYSTEM (NEW)
-    # =========================
+    # ADAPTIVE
     if ADAPTIVE:
         avg_vol = sum(volumes[-20:]) / 20
 
@@ -288,7 +291,7 @@ def analyze(symbol):
     else:
         return None
 
-    probability = 80 + score * 5
+    probability = min(97, max(70, int(80 + abs(score) * 5)))
 
     return signal, price, support, resistance, vol, probability
 
@@ -297,11 +300,11 @@ def analyze(symbol):
 # PROCESS
 # =========================
 def process_symbol(symbol):
-
     global last_sent
 
     try:
         result = analyze(symbol)
+
         if not result:
             return
 
@@ -331,15 +334,16 @@ def process_symbol(symbol):
 💱 Pair: {symbol}
 ⚙ Mode: {MODE}
 🧠 Adaptive: {ADAPTIVE}
+
 {signal}
 🔥 Probability: {probability}%
 
-📥 Entry: {price}
-🎯 TP: {tp}
-🛑 SL: {sl}
+📥 Entry: {round(price, 6)}
+🎯 TP: {round(tp, 6)}
+🛑 SL: {round(sl, 6)}
 
-📊 Support: {support}
-📊 Resistance: {resistance}
+📊 Support: {round(support, 6)}
+📊 Resistance: {round(resistance, 6)}
 """
 
         print(msg)
@@ -355,6 +359,7 @@ def process_symbol(symbol):
 print("🔥 INSTITUTIONAL SNIPER BOT RUNNING")
 
 pairs = get_all_pairs()
+print("Loaded Pairs:", len(pairs))
 
 while True:
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as ex:
